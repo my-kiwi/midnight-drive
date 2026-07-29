@@ -1,0 +1,59 @@
+* {
+  box-sizing: border-box;
+}
+
+html, body {
+  height: 100%;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  background-color: #e0e0e0;
+  color: #121212;
+  overflow: hidden;
+}
+
+@media (prefers-color-scheme: dark) {
+  body {
+    background-color: #121212;
+    color: #e0e0e0;
+  }
+}
+
+#app, main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  width: 100%;
+}
+
+#notepad {
+  flex: 1;
+  width: 100%;
+  height: 100%;
+  border: none;
+  padding: 32px 16px;
+  resize: none;
+  font-family: inherit;
+  font-size: 16px;
+  line-height: 1.5;
+  background-color: inherit;
+  color: inherit;
+  outline: none;
+}
+
+#notepad::placeholder {
+  color: #999999;
+}
+
+@media (prefers-color-scheme: dark) {
+  #notepad::placeholder {
+    color: #666666;
+  }
+}
