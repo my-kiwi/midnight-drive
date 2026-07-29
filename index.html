@@ -232,6 +232,7 @@ const AudioEngine = (function(){
   let drumStartTime = 0;
   const bpm = 96;
   const DRUM_START_DELAY_SEC = 10;
+  const MUTE_STORAGE_KEY = 'midnight-drive-muted';
   const stepDur = 60 / bpm / 2; // 8th notes
   const BASE_VOL = 0.3;
 
@@ -272,8 +273,15 @@ const AudioEngine = (function(){
     if (ctx) return;
     ctx = new (window.AudioContext || window.webkitAudioContext)();
     master = ctx.createGain();
+    const storedMuted = window.localStorage.getItem(MUTE_STORAGE_KEY);
+    if (storedMuted === 'true') {
+      muted = true;
+    } else if (storedMuted === 'false') {
+      muted = false;
+    }
     master.gain.value = BASE_VOL;
     master.connect(ctx.destination);
+    master.gain.setTargetAtTime(muted ? 0 : BASE_VOL, ctx.currentTime, 0.05);
 
     // duckBus carries the melodic/harmonic layers (bass, pad, lead, hats) so
     // we can "sidechain pump" them against the kick without touching the
@@ -492,11 +500,13 @@ const AudioEngine = (function(){
     },
     toggleMute(){
       muted = !muted;
+      window.localStorage.setItem(MUTE_STORAGE_KEY, String(muted));
       if (master) master.gain.setTargetAtTime(muted ? 0 : BASE_VOL, ctx.currentTime, 0.05);
       return muted;
     },
     duck(amount){
       if (master) master.gain.setTargetAtTime(amount, ctx.currentTime, 0.05);
+      if (master) master.gain.setTargetAtTime(muted ? 0 : BASE_VOL, ctx.currentTime, 0.05);
     },
     crash(){
       if (!ctx) return;
@@ -875,6 +885,11 @@ document.getElementById('retry-btn').addEventListener('click', ()=>{
   resetGame();
 });
 const muteBtn = document.getElementById('mute-btn');
+const restoreMuteState = () => {
+  const isMuted = window.localStorage.getItem('midnight-drive-muted') === 'true';
+  muteBtn.textContent = 'SOUND: ' + (isMuted ? 'OFF' : 'ON');
+};
+restoreMuteState();
 muteBtn.addEventListener('click', ()=>{
   const isMuted = AudioEngine.toggleMute();
   muteBtn.textContent = 'SOUND: ' + (isMuted ? 'OFF' : 'ON');
