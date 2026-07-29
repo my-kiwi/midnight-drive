@@ -229,7 +229,9 @@ const AudioEngine = (function(){
   let ctx = null, master = null, delay = null, duckBus = null, hissGain = null;
   let muted = false, started = false;
   let stepIndex = 0, nextStepTime = 0, timerId = null;
+  let drumStartTime = 0;
   const bpm = 96;
+  const DRUM_START_DELAY_SEC = 10;
   const stepDur = 60 / bpm / 2; // 8th notes
   const BASE_VOL = 0.3;
 
@@ -440,9 +442,11 @@ const AudioEngine = (function(){
       const chordIndex = Math.floor(stepIndex / PHRASE_LEN) % prog.length;
       const chord = prog[chordIndex];
 
+      const shouldPlayDrums = nextStepTime >= drumStartTime;
+
       // four-on-the-floor kick + backbeat snare/clap
-      if (step % 2 === 0) playKick(nextStepTime);
-      if (step === 2 || step === 6) playSnare(nextStepTime);
+      if (shouldPlayDrums && step % 2 === 0) playKick(nextStepTime);
+      if (shouldPlayDrums && (step === 2 || step === 6)) playSnare(nextStepTime);
 
       // bass: root pulse with an octave-up passing note for movement
       const bassNote = (step === 2 || step === 6) ? chord.bass + 12 : chord.bass;
@@ -451,7 +455,7 @@ const AudioEngine = (function(){
       // pad swells in at the start of every new chord
       if (phraseStep === 0) playPad(chord.tones, nextStepTime, stepDur*PHRASE_LEN);
 
-      if (hatOn){
+      if (shouldPlayDrums && hatOn){
         if (step % 2 === 1) playHat(nextStepTime, false);
         if (step === 7 && phraseStep === PHRASE_LEN-1) playHat(nextStepTime, true);
       }
@@ -481,6 +485,7 @@ const AudioEngine = (function(){
       if (ctx.state === 'suspended') ctx.resume();
       if (!started){
         started = true;
+        drumStartTime = ctx.currentTime + DRUM_START_DELAY_SEC;
         nextStepTime = ctx.currentTime + 0.1;
         scheduler();
       }
