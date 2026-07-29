@@ -1,5 +1,8 @@
 # Notes
-Basic notes app PWA: https://my-kiwi.github.io/notes
+Basic driving app PWA: https://my-kiwi.github.io/midnight-drive
+
+<img width="1737" height="1002" alt="image" src="https://github.com/user-attachments/assets/18b3b381-2206-4387-8ed1-b1289517d5bb" />
+
 
 ## Install the PWA
 ### Apple iOS
@@ -10,8 +13,3 @@ Basic notes app PWA: https://my-kiwi.github.io/notes
 2. Select "Add to Home screen"
 3. Confirm by tapping "Add"
 
-## Project setup
-after cloning, run
-- `nvm use`
-- `npm i`
-- `npm run dev`
