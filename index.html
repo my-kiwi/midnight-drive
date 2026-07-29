@@ -226,21 +226,42 @@
    AUDIO ENGINE — original procedural synthwave, not the source track
    ============================================================ */
 const AudioEngine = (function(){
-  let ctx = null, master = null, delay = null, muted = false, started = false;
+  let ctx = null, master = null, delay = null, duckBus = null, hissGain = null;
+  let muted = false, started = false;
   let stepIndex = 0, nextStepTime = 0, timerId = null;
   const bpm = 96;
   const stepDur = 60 / bpm / 2; // 8th notes
+  const BASE_VOL = 0.3;
 
-  // original chord progression (vi-IV-I-V feel), NOT transcribed from any existing song.
-  // Each chord holds for 16 steps (2 bars) before moving to the next, so the
-  // harmony keeps shifting instead of looping one 4-bar riff forever.
-  const progression = [
+  // Two original chord progressions (NOT transcribed from any existing song),
+  // used as alternating "sections" — a moody A section and a slightly
+  // brighter B section — so the harmony changes over roughly 40s rather
+  // than looping one riff. Each chord holds 16 steps (2 bars).
+  const progA = [
     { bass:45, tones:[57,60,64] }, // Am  (A2 | A3 C4 E4)
     { bass:41, tones:[53,57,60] }, // F   (F2 | F3 A3 C4)
     { bass:48, tones:[52,55,60] }, // C   (C3 | E3 G3 C4)
     { bass:43, tones:[50,55,59] }  // G   (G2 | D3 G3 B3)
   ];
-  const PHRASE_LEN = 16; // steps per chord
+  const progB = [
+    { bass:38, tones:[50,53,57] }, // Dm  (D2 | D3 F3 A3)
+    { bass:43, tones:[55,59,62] }, // G   (G2 | G3 B3 D4)
+    { bass:36, tones:[48,52,55] }, // C   (C2 | C3 E3 G3)
+    { bass:45, tones:[57,60,64] }  // Am  (A2 | A3 C4 E4)
+  ];
+  const PHRASE_LEN = 16;         // steps per chord
+  const SECTION_LEN = PHRASE_LEN * progA.length; // 64 steps (~13.3s at 96bpm) per section
+
+  // A few different arpeggio contours; which one plays is picked from the
+  // section/chord position, so the lead line changes shape as the song moves.
+  const arpPatterns = [
+    n => n % 3,
+    n => 2 - (n % 3),
+    n => [0,1,2,1][n % 4],
+    n => [0,2,1,2][n % 4],
+    n => [0,1,0,2][n % 4]
+  ];
+
   let hatOn = true;
 
   function midiToFreq(m){ return 440 * Math.pow(2, (m-69)/12); }
@@ -249,10 +270,18 @@ const AudioEngine = (function(){
     if (ctx) return;
     ctx = new (window.AudioContext || window.webkitAudioContext)();
     master = ctx.createGain();
-    master.gain.value = 0.28;
+    master.gain.value = BASE_VOL;
     master.connect(ctx.destination);
 
-    // slap-back delay bus, used only by the lead arp for a bit of spatial trail
+    // duckBus carries the melodic/harmonic layers (bass, pad, lead, hats) so
+    // we can "sidechain pump" them against the kick without touching the
+    // drums themselves — this is the thing that makes it feel produced
+    // rather than just a MIDI-ish loop.
+    duckBus = ctx.createGain();
+    duckBus.gain.value = 1;
+    duckBus.connect(master);
+
+    // slap-back delay, used by the lead arp for a bit of spatial trail
     delay = ctx.createDelay(2.0);
     delay.delayTime.value = stepDur * 1.5;
     const feedback = ctx.createGain();
@@ -262,6 +291,90 @@ const AudioEngine = (function(){
     delayFilter.frequency.value = 2200;
     delay.connect(feedback); feedback.connect(delayFilter); delayFilter.connect(delay);
     delay.connect(master);
+
+    // soft tape-hiss bed for atmosphere
+    const hissBuf = ctx.createBuffer(1, ctx.sampleRate*2, ctx.sampleRate);
+    const hissData = hissBuf.getChannelData(0);
+    for (let i=0;i<hissData.length;i++) hissData[i] = Math.random()*2-1;
+    const hiss = ctx.createBufferSource();
+    hiss.buffer = hissBuf; hiss.loop = true;
+    const hissFilter = ctx.createBiquadFilter();
+    hissFilter.type = 'bandpass'; hissFilter.frequency.value = 4500; hissFilter.Q.value = 0.6;
+    hissGain = ctx.createGain();
+    hissGain.gain.value = 0.012;
+    hiss.connect(hissFilter); hissFilter.connect(hissGain); hissGain.connect(master);
+    hiss.start();
+  }
+
+  function sidechainPump(time){
+    duckBus.gain.cancelScheduledValues(time);
+    duckBus.gain.setValueAtTime(1, time);
+    duckBus.gain.linearRampToValueAtTime(0.38, time + 0.05);
+    duckBus.gain.linearRampToValueAtTime(1, time + 0.32);
+  }
+
+  function playKick(time){
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(150, time);
+    osc.frequency.exponentialRampToValueAtTime(42, time + 0.13);
+    gain.gain.setValueAtTime(0.9, time);
+    gain.gain.exponentialRampToValueAtTime(0.001, time + 0.32);
+    osc.connect(gain); gain.connect(master);
+    osc.start(time); osc.stop(time + 0.35);
+
+    // tiny click for attack punch
+    const clickBuf = ctx.createBuffer(1, ctx.sampleRate*0.01, ctx.sampleRate);
+    const clickData = clickBuf.getChannelData(0);
+    for (let i=0;i<clickData.length;i++) clickData[i] = (Math.random()*2-1)*(1-i/clickData.length);
+    const click = ctx.createBufferSource();
+    click.buffer = clickBuf;
+    const clickGain = ctx.createGain();
+    clickGain.gain.value = 0.25;
+    click.connect(clickGain); clickGain.connect(master);
+    click.start(time);
+
+    sidechainPump(time);
+  }
+
+  function playSnare(time){
+    const bufferSize = ctx.sampleRate * 0.15;
+    const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i=0;i<bufferSize;i++) data[i] = (Math.random()*2-1) * Math.pow(1 - i/bufferSize, 1.5);
+    const noise = ctx.createBufferSource();
+    noise.buffer = buffer;
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass'; bp.frequency.value = 1800; bp.Q.value = 0.7;
+    const gain = ctx.createGain();
+    gain.gain.value = 0.35;
+    noise.connect(bp); bp.connect(gain); gain.connect(master);
+    noise.start(time);
+
+    const tone = ctx.createOscillator();
+    const toneGain = ctx.createGain();
+    tone.type = 'triangle'; tone.frequency.value = 190;
+    toneGain.gain.setValueAtTime(0.18, time);
+    toneGain.gain.exponentialRampToValueAtTime(0.001, time + 0.1);
+    tone.connect(toneGain); toneGain.connect(master);
+    tone.start(time); tone.stop(time + 0.12);
+  }
+
+  function playHat(time, open){
+    const dur = open ? 0.18 : 0.03;
+    const bufferSize = ctx.sampleRate * dur;
+    const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i=0;i<bufferSize;i++) data[i] = (Math.random()*2-1) * (1 - i/bufferSize);
+    const noise = ctx.createBufferSource();
+    noise.buffer = buffer;
+    const hp = ctx.createBiquadFilter();
+    hp.type = 'highpass'; hp.frequency.value = 6500;
+    const gain = ctx.createGain();
+    gain.gain.value = open ? 0.09 : 0.14;
+    noise.connect(hp); hp.connect(gain); gain.connect(duckBus);
+    noise.start(time);
   }
 
   function playBassNote(freq, time, dur){
@@ -275,7 +388,7 @@ const AudioEngine = (function(){
     gain.gain.setValueAtTime(0.0001, time);
     gain.gain.linearRampToValueAtTime(0.5, time + 0.02);
     gain.gain.exponentialRampToValueAtTime(0.001, time + dur);
-    osc.connect(filter); filter.connect(gain); gain.connect(master);
+    osc.connect(filter); filter.connect(gain); gain.connect(duckBus);
     osc.start(time); osc.stop(time + dur + 0.05);
   }
 
@@ -285,7 +398,7 @@ const AudioEngine = (function(){
     filter.frequency.setValueAtTime(350, time);
     filter.frequency.linearRampToValueAtTime(1600, time + dur*0.6);
     filter.frequency.linearRampToValueAtTime(500, time + dur);
-    filter.connect(master);
+    filter.connect(duckBus);
     tones.forEach((m,i)=>{
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
@@ -301,40 +414,35 @@ const AudioEngine = (function(){
   }
 
   function playLead(freq, time, dur){
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.type = 'sawtooth';
-    osc.frequency.value = freq;
-    gain.gain.setValueAtTime(0.0001, time);
-    gain.gain.linearRampToValueAtTime(0.16, time + 0.01);
-    gain.gain.exponentialRampToValueAtTime(0.0001, time + dur);
-    osc.connect(gain);
-    gain.connect(master);
-    gain.connect(delay);
-    osc.start(time); osc.stop(time + dur + 0.05);
-  }
-
-  function playHat(time){
-    const bufferSize = ctx.sampleRate * 0.03;
-    const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
-    const data = buffer.getChannelData(0);
-    for (let i=0;i<bufferSize;i++) data[i] = (Math.random()*2-1) * (1 - i/bufferSize);
-    const noise = ctx.createBufferSource();
-    noise.buffer = buffer;
-    const hp = ctx.createBiquadFilter();
-    hp.type = 'highpass'; hp.frequency.value = 6000;
-    const gain = ctx.createGain();
-    gain.gain.value = 0.15;
-    noise.connect(hp); hp.connect(gain); gain.connect(master);
-    noise.start(time);
+    // two slightly detuned saws for a thicker, more "synth" lead tone
+    [-6, 6].forEach(detune=>{
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sawtooth';
+      osc.frequency.value = freq;
+      osc.detune.value = detune;
+      gain.gain.setValueAtTime(0.0001, time);
+      gain.gain.linearRampToValueAtTime(0.09, time + 0.01);
+      gain.gain.exponentialRampToValueAtTime(0.0001, time + dur);
+      osc.connect(gain);
+      gain.connect(duckBus);
+      gain.connect(delay);
+      osc.start(time); osc.stop(time + dur + 0.05);
+    });
   }
 
   function scheduler(){
     while (nextStepTime < ctx.currentTime + 0.15){
-      const step = stepIndex % 8;
+      const step = stepIndex % 8;             // position within the bar (8th notes)
       const phraseStep = stepIndex % PHRASE_LEN;
-      const chordIndex = Math.floor(stepIndex / PHRASE_LEN) % progression.length;
-      const chord = progression[chordIndex];
+      const sectionIndex = Math.floor(stepIndex / SECTION_LEN) % 2;
+      const prog = sectionIndex === 0 ? progA : progB;
+      const chordIndex = Math.floor(stepIndex / PHRASE_LEN) % prog.length;
+      const chord = prog[chordIndex];
+
+      // four-on-the-floor kick + backbeat snare/clap
+      if (step % 2 === 0) playKick(nextStepTime);
+      if (step === 2 || step === 6) playSnare(nextStepTime);
 
       // bass: root pulse with an octave-up passing note for movement
       const bassNote = (step === 2 || step === 6) ? chord.bass + 12 : chord.bass;
@@ -343,14 +451,20 @@ const AudioEngine = (function(){
       // pad swells in at the start of every new chord
       if (phraseStep === 0) playPad(chord.tones, nextStepTime, stepDur*PHRASE_LEN);
 
-      if (hatOn && step % 2 === 1) playHat(nextStepTime);
+      if (hatOn){
+        if (step % 2 === 1) playHat(nextStepTime, false);
+        if (step === 7 && phraseStep === PHRASE_LEN-1) playHat(nextStepTime, true);
+      }
 
-      // lead arpeggio only surfaces on alternating chords, so it feels like
-      // a second section rather than a wall-to-wall loop
+      // lead arpeggio surfaces on alternating chords with a pattern that
+      // changes per chord, so no two phrases play the exact same melody
       if (chordIndex === 1 || chordIndex === 3){
         const arp = chord.tones;
-        const i1 = Math.floor(phraseStep/2) % arp.length;
-        const i2 = (i1+1) % arp.length;
+        const patternSeed = sectionIndex*prog.length + chordIndex;
+        const pattern = arpPatterns[patternSeed % arpPatterns.length];
+        const n = phraseStep * 2;
+        const i1 = pattern(n) % arp.length;
+        const i2 = pattern(n+1) % arp.length;
         playLead(midiToFreq(arp[i1]+12), nextStepTime, stepDur*0.4);
         playLead(midiToFreq(arp[i2]+12), nextStepTime + stepDur/2, stepDur*0.4);
       }
@@ -373,7 +487,7 @@ const AudioEngine = (function(){
     },
     toggleMute(){
       muted = !muted;
-      if (master) master.gain.setTargetAtTime(muted ? 0 : 0.28, ctx.currentTime, 0.05);
+      if (master) master.gain.setTargetAtTime(muted ? 0 : BASE_VOL, ctx.currentTime, 0.05);
       return muted;
     },
     duck(amount){
