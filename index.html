@@ -229,12 +229,33 @@ const AudioEngine = (function(){
   let ctx = null, master = null, delay = null, duckBus = null, hissGain = null;
   let muted = false, started = false;
   let stepIndex = 0, nextStepTime = 0, timerId = null;
-  let drumStartTime = 0;
+  let engineStartTime = 0;
   const bpm = 96;
-  const DRUM_START_DELAY_SEC = 10;
   const MUTE_STORAGE_KEY = 'midnight-drive-muted';
   const stepDur = 60 / bpm / 2; // 8th notes
   const BASE_VOL = 0.3;
+
+  // Drums drop out for a stretch every so often — like a breakdown — instead
+  // of just playing straight through. First INTRO_SILENCE_SEC has no drums
+  // at all; after that, every DRUM_CYCLE_SEC the drums go silent for
+  // DRUM_MUTE_SEC, with a short DRUM_FADE_SEC crossfade at each edge so it's
+  // a dip, not an abrupt on/off click.
+  const INTRO_SILENCE_SEC = 10;
+  const DRUM_CYCLE_SEC = 60;
+  const DRUM_MUTE_SEC = 10;
+  const DRUM_FADE_SEC = 1;
+
+  function getDrumMult(time){
+    const t = time - engineStartTime;
+    if (t < INTRO_SILENCE_SEC) return 0;
+    const cyclePos = (t - INTRO_SILENCE_SEC) % DRUM_CYCLE_SEC;
+    if (cyclePos < DRUM_MUTE_SEC) return 0;
+    const sinceMuteEnd = cyclePos - DRUM_MUTE_SEC;
+    const untilCycleEnd = DRUM_CYCLE_SEC - cyclePos;
+    const fadeIn = Math.min(1, sinceMuteEnd / DRUM_FADE_SEC);
+    const fadeOut = Math.min(1, untilCycleEnd / DRUM_FADE_SEC);
+    return Math.min(fadeIn, fadeOut);
+  }
 
   // Two original chord progressions (NOT transcribed from any existing song),
   // used as alternating "sections" — a moody A section and a slightly
@@ -316,20 +337,20 @@ const AudioEngine = (function(){
     hiss.start();
   }
 
-  function sidechainPump(time){
+  function sidechainPump(time, mult){
     duckBus.gain.cancelScheduledValues(time);
     duckBus.gain.setValueAtTime(1, time);
-    duckBus.gain.linearRampToValueAtTime(0.38, time + 0.05);
+    duckBus.gain.linearRampToValueAtTime(1 - 0.62*mult, time + 0.05);
     duckBus.gain.linearRampToValueAtTime(1, time + 0.32);
   }
 
-  function playKick(time){
+  function playKick(time, mult){
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.type = 'sine';
     osc.frequency.setValueAtTime(150, time);
     osc.frequency.exponentialRampToValueAtTime(42, time + 0.13);
-    gain.gain.setValueAtTime(0.9, time);
+    gain.gain.setValueAtTime(0.9*mult, time);
     gain.gain.exponentialRampToValueAtTime(0.001, time + 0.32);
     osc.connect(gain); gain.connect(master);
     osc.start(time); osc.stop(time + 0.35);
@@ -341,14 +362,14 @@ const AudioEngine = (function(){
     const click = ctx.createBufferSource();
     click.buffer = clickBuf;
     const clickGain = ctx.createGain();
-    clickGain.gain.value = 0.25;
+    clickGain.gain.value = 0.25*mult;
     click.connect(clickGain); clickGain.connect(master);
     click.start(time);
 
-    sidechainPump(time);
+    sidechainPump(time, mult);
   }
 
-  function playSnare(time){
+  function playSnare(time, mult){
     const bufferSize = ctx.sampleRate * 0.15;
     const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
     const data = buffer.getChannelData(0);
@@ -358,20 +379,20 @@ const AudioEngine = (function(){
     const bp = ctx.createBiquadFilter();
     bp.type = 'bandpass'; bp.frequency.value = 1800; bp.Q.value = 0.7;
     const gain = ctx.createGain();
-    gain.gain.value = 0.35;
+    gain.gain.value = 0.35*mult;
     noise.connect(bp); bp.connect(gain); gain.connect(master);
     noise.start(time);
 
     const tone = ctx.createOscillator();
     const toneGain = ctx.createGain();
     tone.type = 'triangle'; tone.frequency.value = 190;
-    toneGain.gain.setValueAtTime(0.18, time);
+    toneGain.gain.setValueAtTime(0.18*mult, time);
     toneGain.gain.exponentialRampToValueAtTime(0.001, time + 0.1);
     tone.connect(toneGain); toneGain.connect(master);
     tone.start(time); tone.stop(time + 0.12);
   }
 
-  function playHat(time, open){
+  function playHat(time, open, mult){
     const dur = open ? 0.18 : 0.03;
     const bufferSize = ctx.sampleRate * dur;
     const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
@@ -382,7 +403,7 @@ const AudioEngine = (function(){
     const hp = ctx.createBiquadFilter();
     hp.type = 'highpass'; hp.frequency.value = 6500;
     const gain = ctx.createGain();
-    gain.gain.value = open ? 0.09 : 0.14;
+    gain.gain.value = (open ? 0.09 : 0.14) * mult;
     noise.connect(hp); hp.connect(gain); gain.connect(duckBus);
     noise.start(time);
   }
@@ -450,11 +471,12 @@ const AudioEngine = (function(){
       const chordIndex = Math.floor(stepIndex / PHRASE_LEN) % prog.length;
       const chord = prog[chordIndex];
 
-      const shouldPlayDrums = nextStepTime >= drumStartTime;
+      const drumMult = getDrumMult(nextStepTime);
+      const shouldPlayDrums = drumMult > 0.001;
 
       // four-on-the-floor kick + backbeat snare/clap
-      if (shouldPlayDrums && step % 2 === 0) playKick(nextStepTime);
-      if (shouldPlayDrums && (step === 2 || step === 6)) playSnare(nextStepTime);
+      if (shouldPlayDrums && step % 2 === 0) playKick(nextStepTime, drumMult);
+      if (shouldPlayDrums && (step === 2 || step === 6)) playSnare(nextStepTime, drumMult);
 
       // bass: root pulse with an octave-up passing note for movement
       const bassNote = (step === 2 || step === 6) ? chord.bass + 12 : chord.bass;
@@ -464,8 +486,8 @@ const AudioEngine = (function(){
       if (phraseStep === 0) playPad(chord.tones, nextStepTime, stepDur*PHRASE_LEN);
 
       if (shouldPlayDrums && hatOn){
-        if (step % 2 === 1) playHat(nextStepTime, false);
-        if (step === 7 && phraseStep === PHRASE_LEN-1) playHat(nextStepTime, true);
+        if (step % 2 === 1) playHat(nextStepTime, false, drumMult);
+        if (step === 7 && phraseStep === PHRASE_LEN-1) playHat(nextStepTime, true, drumMult);
       }
 
       // lead arpeggio surfaces on alternating chords with a pattern that
@@ -493,7 +515,7 @@ const AudioEngine = (function(){
       if (ctx.state === 'suspended') ctx.resume();
       if (!started){
         started = true;
-        drumStartTime = ctx.currentTime + DRUM_START_DELAY_SEC;
+        engineStartTime = ctx.currentTime;
         nextStepTime = ctx.currentTime + 0.1;
         scheduler();
       }
@@ -505,8 +527,9 @@ const AudioEngine = (function(){
       return muted;
     },
     duck(amount){
-      if (master) master.gain.setTargetAtTime(amount, ctx.currentTime, 0.05);
-      if (master) master.gain.setTargetAtTime(muted ? 0 : BASE_VOL, ctx.currentTime, 0.05);
+      if (!master) return;
+      const target = muted ? 0 : amount;
+      master.gain.setTargetAtTime(target, ctx.currentTime, 0.05);
     },
     crash(){
       if (!ctx) return;
