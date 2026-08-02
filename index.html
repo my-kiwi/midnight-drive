@@ -153,6 +153,60 @@
   @media (pointer:coarse){
     #touch-controls{ display:block; }
   }
+
+  /* leaderboard / name-entry overlay (injected by the leaderboard module) */
+  #ui-overlay{
+    position:fixed; inset:0; z-index:60;
+    display:flex; align-items:center; justify-content:center;
+    background:radial-gradient(ellipse at 50% 30%, rgba(60,10,60,0.55), rgba(4,1,10,0.94) 70%);
+    padding:24px;
+  }
+  .ui-card{
+    width:100%; max-width:380px;
+    background:rgba(10,4,20,0.92);
+    border:1px solid var(--cyan);
+    box-shadow:0 0 30px rgba(0,229,255,0.25), 0 0 60px rgba(255,45,149,0.15);
+    border-radius:6px;
+    padding:26px 22px;
+    font-family:'Share Tech Mono', monospace;
+    color:#e6d9f2;
+    text-align:center;
+  }
+  .ui-card h2{
+    font-family:'Orbitron', sans-serif; font-weight:700; letter-spacing:2px;
+    font-size:20px; margin:0 0 14px;
+    color:var(--cyan); text-shadow:0 0 8px var(--cyan);
+  }
+  .ui-card p{ margin:0 0 14px; font-size:13px; opacity:0.85; }
+  .ui-card label{
+    display:block; font-size:11px; letter-spacing:2px; opacity:0.7;
+    margin-bottom:8px; text-transform:uppercase;
+  }
+  .ui-card input{
+    width:100%; padding:10px 12px; margin-bottom:16px;
+    background:rgba(255,255,255,0.05); border:1px solid rgba(0,229,255,0.4);
+    color:#fff; font-family:'Share Tech Mono', monospace; font-size:14px;
+    border-radius:3px; outline:none;
+  }
+  .ui-card input:focus{ border-color:var(--hot-pink); }
+  .leaderboard-list{
+    max-height:42vh; overflow-y:auto; margin-bottom:18px;
+    display:flex; flex-direction:column; gap:6px;
+  }
+  .leaderboard-row{
+    display:grid; grid-template-columns:26px 1fr auto auto; gap:8px;
+    align-items:center; font-size:12px; padding:7px 8px;
+    background:rgba(255,255,255,0.03); border-radius:3px;
+    text-align:left;
+  }
+  .leaderboard-rank{ color:var(--hot-pink); font-weight:700; }
+  .leaderboard-name{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .leaderboard-score{ color:var(--cyan); white-space:nowrap; }
+  .leaderboard-deaths{ opacity:0.55; font-size:10px; white-space:nowrap; }
+  #best-score-msg{
+    font-family:'Share Tech Mono', monospace; color:var(--cyan);
+    font-size:11px; letter-spacing:2px; opacity:0.8; min-height:14px;
+  }
 </style>
 </head>
 <body>
@@ -205,6 +259,8 @@
   </div>
   <button class="btn" id="start-btn">START ENGINE</button>
   <div id="loading-msg"></div>
+  <div id="best-score-msg"></div>
+  <button class="btn" id="view-leaderboard-btn" style="background:transparent; border:1px solid var(--cyan); box-shadow:none; color:var(--cyan); padding:10px 30px; font-size:12px;">LEADERBOARD</button>
 </div>
 
 <div class="overlay hidden" id="gameover-overlay">
@@ -218,6 +274,260 @@
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+<script type="module">
+/* ============================================================
+   LEADERBOARD MODULE — Firebase (Firestore) high-score board.
+   Runs as an ES module (required for Firebase's modular SDK).
+   Exposes itself as window.Leaderboard, and fires a
+   'leaderboard-ready' event, so the classic game script below
+   (which may execute before this module finishes loading) can
+   safely hook into it whenever it becomes available.
+   ============================================================ */
+import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js';
+import { getAuth, signInAnonymously } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js';
+import {
+  getFirestore,
+  collection,
+  doc,
+  getDoc,
+  getDocs,
+  increment,
+  limit,
+  orderBy,
+  query,
+  serverTimestamp,
+  setDoc,
+} from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js';
+
+function escapeHtml(str){
+  const map = { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' };
+  return str.replace(/[&<>"']/g, (char) => map[char]);
+}
+
+const firebaseConfig = {
+  apiKey: 'AIzaSyC3xJsRS7dsa4p2Pt9wq2y-JUIR-sIY4AM',
+  authDomain: 'my-kiwi-games.firebaseapp.com',
+  projectId: 'my-kiwi-games',
+  storageBucket: 'my-kiwi-games.firebasestorage.app',
+  messagingSenderId: '152877228068',
+  appId: '1:152877228068:web:1c231f08386318537ff8b1',
+  measurementId: 'G-XGZZ8MXJJQ',
+};
+
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const docPath = 'midnight-drive-scores';
+
+let firebaseUid = null;
+let currentUserUid = null;
+let currentUserName = null;
+let bestScore = 0;
+
+const authReady = signInAnonymously(auth)
+  .then((userCredential) => {
+    firebaseUid = userCredential.user.uid;
+  })
+  .catch((error) => {
+    console.error('Anonymous sign-in failed:', error.code, error.message);
+    return Promise.reject(error);
+  });
+
+async function getLeaderboardUid(){
+  if (firebaseUid) return firebaseUid;
+  try { await authReady; } catch { /* fall back to a local uid below */ }
+  if (firebaseUid) return firebaseUid;
+  return crypto.randomUUID();
+}
+
+async function savePlayerScore(uid, name, scoreValue){
+  try {
+    const docRef = doc(db, docPath, uid);
+    const existingDoc = await getDoc(docRef);
+
+    if (existingDoc.exists()){
+      const updateDocData = {
+        name,
+        score: Math.max(scoreValue, existingDoc.data()?.score || 0),
+        deaths: increment(1),
+        updatedAt: serverTimestamp(),
+      };
+      await setDoc(docRef, updateDocData, { merge:true });
+    } else {
+      const createDoc = {
+        userId: uid,
+        name,
+        score: scoreValue,
+        deaths: 1,
+        updatedAt: serverTimestamp(),
+      };
+      await setDoc(docRef, createDoc);
+    }
+  } catch (error){
+    console.error('Error saving score:', error);
+  }
+}
+
+async function fetchLeaderboard(){
+  try {
+    const leaderboardQuery = query(collection(db, docPath), orderBy('score', 'desc'), limit(100));
+    const querySnapshot = await getDocs(leaderboardQuery);
+    return querySnapshot.docs.map((docSnap) => ({
+      id: docSnap.id,
+      userId: docSnap.data().userId,
+      name: docSnap.data().name,
+      score: docSnap.data().score,
+      deaths: docSnap.data().deaths ?? 0,
+    }));
+  } catch (error){
+    console.error('Error fetching leaderboard:', error);
+    return [];
+  }
+}
+
+async function fetchUserRecord(uid){
+  try {
+    const userDoc = await getDoc(doc(db, docPath, uid));
+    if (!userDoc.exists()) return null;
+    const data = userDoc.data();
+    return {
+      id: userDoc.id,
+      userId: data.userId,
+      name: data.name,
+      score: data.score,
+      deaths: data.deaths ?? 0,
+      updatedAt: data.updatedAt,
+    };
+  } catch (error){
+    console.error('Error fetching user record:', error);
+    return null;
+  }
+}
+
+function clearOverlay(){
+  const existing = document.getElementById('ui-overlay');
+  if (existing) existing.remove();
+}
+
+function showLoadingOverlay(message){
+  clearOverlay();
+  const overlay = document.createElement('div');
+  overlay.id = 'ui-overlay';
+  overlay.innerHTML = `<div class="ui-card"><h2>${escapeHtml(message)}</h2></div>`;
+  document.body.appendChild(overlay);
+}
+
+function showLeaderboardOverlay(scores, onRetry){
+  clearOverlay();
+  const overlay = document.createElement('div');
+  overlay.id = 'ui-overlay';
+  overlay.innerHTML = `
+    <div class="ui-card">
+      <h2>Leaderboard</h2>
+      <div class="leaderboard-list">
+        ${scores.length ? scores
+          .map(
+            (entry, index) =>
+              `<div class="leaderboard-row">
+                <span class="leaderboard-rank">${index + 1}.</span>
+                <span class="leaderboard-name">${escapeHtml(entry.name ?? '')}</span>
+                <span class="leaderboard-score">${entry.score} m</span>
+                <span class="leaderboard-deaths">${entry.deaths ?? 0} drives</span>
+              </div>`
+          )
+          .join('') : '<p>No runs recorded yet — be the first.</p>'}
+      </div>
+      <button class="btn" id="retry-button">RETRY</button>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  document.getElementById('retry-button')?.addEventListener('click', () => {
+    clearOverlay();
+    onRetry();
+  });
+}
+
+function showNameEntryOverlay(scoreValue, onSubmit){
+  clearOverlay();
+  const overlay = document.createElement('div');
+  overlay.id = 'ui-overlay';
+  overlay.innerHTML = `
+    <div class="ui-card">
+      <h2>New Personal Best!</h2>
+      <p>Your score: <strong>${scoreValue} m</strong></p>
+      <label for="player-name-input">Enter your name</label>
+      <input id="player-name-input" type="text" maxlength="20" placeholder="Your name" />
+      <button class="btn" id="submit-name-button">SUBMIT</button>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  const submitButton = document.getElementById('submit-name-button');
+  const nameInput = document.getElementById('player-name-input');
+  const submit = async () => {
+    const name = nameInput?.value.trim() || '';
+    if (!name){ nameInput?.focus(); return; }
+    await onSubmit(name);
+  };
+  submitButton?.addEventListener('click', submit);
+  nameInput?.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
+}
+
+async function loadUserBestScore(){
+  try {
+    currentUserUid = await getLeaderboardUid();
+    const userRecord = await fetchUserRecord(currentUserUid);
+    if (userRecord){
+      currentUserName = userRecord.name;
+      bestScore = userRecord.score;
+    } else {
+      currentUserName = null;
+      bestScore = 0;
+    }
+  } catch (error){
+    console.error('Failed to load user best score:', error);
+  }
+  return bestScore;
+}
+
+async function handleLeaderboardFlow(score, onComplete){
+  if (!currentUserUid){
+    console.error('Current user UID is not set. Cannot handle leaderboard flow.');
+    onComplete();
+    return;
+  }
+  const saveScoreAndShowLeaderboard = async (uuid, name) => {
+    await savePlayerScore(uuid, name, score);
+    if (score > bestScore) bestScore = score;
+    const scores = await fetchLeaderboard();
+    showLeaderboardOverlay(scores, onComplete);
+  };
+
+  if (currentUserName){
+    await saveScoreAndShowLeaderboard(currentUserUid, currentUserName);
+    return;
+  }
+
+  showNameEntryOverlay(score, async (name) => {
+    currentUserName = name; // remember it so we're not asked again this session
+    await saveScoreAndShowLeaderboard(currentUserUid, name);
+  });
+}
+
+const ready = loadUserBestScore();
+
+window.Leaderboard = {
+  ready,
+  getBestScore: () => bestScore,
+  fetchLeaderboard,
+  handleLeaderboardFlow,
+  showLeaderboardOverlay,
+  showLoadingOverlay,
+  clearOverlay,
+};
+window.dispatchEvent(new Event('leaderboard-ready'));
+</script>
+
 <script>
 (function(){
 "use strict";
@@ -898,14 +1208,63 @@ document.getElementById('touch-right').addEventListener('touchstart', (e)=>{ e.p
 const distanceValEl = document.getElementById('distance-val');
 const speedValEl = document.getElementById('speed-val');
 
+/* ---- Leaderboard handoff ----
+   The leaderboard module is a <script type="module">, which always
+   executes AFTER this classic script's top-level code runs — so
+   window.Leaderboard may not exist yet at parse time. Callbacks that
+   need it are deferred until either it's already there, or the
+   'leaderboard-ready' event fires. */
+function whenLeaderboardReady(cb){
+  if (window.Leaderboard){ cb(window.Leaderboard); return; }
+  window.addEventListener('leaderboard-ready', () => cb(window.Leaderboard), { once:true });
+}
+
+whenLeaderboardReady((LB) => {
+  LB.ready.then((best) => {
+    const el = document.getElementById('best-score-msg');
+    if (el && best > 0) el.textContent = `PERSONAL BEST: ${best} m`;
+  });
+});
+
+document.getElementById('view-leaderboard-btn').addEventListener('click', () => {
+  whenLeaderboardReady(async (LB) => {
+    LB.showLoadingOverlay('Loading leaderboard…');
+    const scores = await LB.fetchLeaderboard();
+    LB.showLeaderboardOverlay(scores, () => LB.clearOverlay());
+  });
+});
+
 /* ---- UI wiring ---- */
 document.getElementById('start-btn').addEventListener('click', ()=>{
   AudioEngine.start();
   resetGame();
 });
 document.getElementById('retry-btn').addEventListener('click', ()=>{
-  AudioEngine.start();
-  resetGame();
+  document.getElementById('gameover-overlay').classList.add('hidden');
+  const finalDistance = Math.floor(state.distance);
+  const startNewRun = () => { AudioEngine.start(); resetGame(); };
+
+  // If Firebase never becomes available (offline, blocked, misconfigured),
+  // don't strand the player on a blank screen — just start a new run.
+  let settled = false;
+  const timeout = setTimeout(() => {
+    if (!settled){ settled = true; startNewRun(); }
+  }, 4000);
+
+  whenLeaderboardReady(async (LB) => {
+    if (settled) return;
+    clearTimeout(timeout);
+    settled = true;
+    LB.showLoadingOverlay('Saving your run…');
+    try {
+      await LB.ready;
+      await LB.handleLeaderboardFlow(finalDistance, startNewRun);
+    } catch (err){
+      console.error('Leaderboard flow failed, starting a new run.', err);
+      LB.clearOverlay();
+      startNewRun();
+    }
+  });
 });
 const muteBtn = document.getElementById('mute-btn');
 const restoreMuteState = () => {
