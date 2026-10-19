@@ -243,6 +243,7 @@
     Cruise the neon highway till dawn.<br>
     <b>← → / A D</b> to change lanes.<br>
     <b>↑ / W</b> to floor it.<br>
+    <b>Left stick / D-pad</b> to steer; <b>A / RT</b> to accelerate.<br>
     Clip a car, the drive ends.
   </div>
   <button class="btn" id="start-btn">START ENGINE</button>
@@ -1018,6 +1019,57 @@ function resetGame(){
 
 /* ---- Input ---- */
 const keys = {};
+const GAMEPAD_DEADZONE = 0.35;
+const GAMEPAD_BUTTONS = { south: 0, rightTrigger: 7, start: 9, dpadLeft: 14, dpadRight: 15 };
+let activeGamepadIndex;
+let previousGamepadButtons = [];
+
+function pollGamepadInput(){
+  const gamepads = navigator.getGamepads?.();
+  const gamepad = gamepads && (
+    (activeGamepadIndex !== undefined && gamepads[activeGamepadIndex]) ||
+    Array.from(gamepads).find((pad) => pad !== null)
+  );
+
+  if (!gamepad){
+    activeGamepadIndex = undefined;
+    previousGamepadButtons = [];
+    return { left:false, right:false, accelerate:false };
+  }
+
+  if (gamepad.index !== activeGamepadIndex){
+    activeGamepadIndex = gamepad.index;
+    previousGamepadButtons = [];
+  }
+
+  const isPressed = (buttonIndex) => gamepad.buttons[buttonIndex]?.pressed ?? false;
+  const wasPressed = (buttonIndex) => previousGamepadButtons[buttonIndex] ?? false;
+  const wasJustPressed = (buttonIndex) => isPressed(buttonIndex) && !wasPressed(buttonIndex);
+  const activate = wasJustPressed(GAMEPAD_BUTTONS.south) || wasJustPressed(GAMEPAD_BUTTONS.start);
+  const input = {
+    left: (gamepad.axes[0] ?? 0) < -GAMEPAD_DEADZONE || isPressed(GAMEPAD_BUTTONS.dpadLeft),
+    right: (gamepad.axes[0] ?? 0) > GAMEPAD_DEADZONE || isPressed(GAMEPAD_BUTTONS.dpadRight),
+    accelerate:
+      isPressed(GAMEPAD_BUTTONS.south) ||
+      isPressed(GAMEPAD_BUTTONS.rightTrigger) ||
+      (gamepad.buttons[GAMEPAD_BUTTONS.rightTrigger]?.value ?? 0) > 0.5,
+  };
+
+  previousGamepadButtons = gamepad.buttons.map((button) => button.pressed);
+
+  if (activate && state.mode === 'menu'){
+    document.getElementById('start-btn').click();
+  } else if (
+    activate &&
+    state.mode === 'gameover' &&
+    !document.getElementById('ui-overlay')
+  ){
+    document.getElementById('retry-btn').click();
+  }
+
+  return input;
+}
+
 window.addEventListener('keydown', (e)=>{
   keys[e.code] = true;
   if (['ArrowLeft','ArrowRight','ArrowUp','KeyA','KeyD','KeyW'].includes(e.code)) e.preventDefault();
@@ -1128,16 +1180,17 @@ function triggerGameOver(){
 function animate(){
   requestAnimationFrame(animate);
   const dt = Math.min(clock.getDelta(), 0.05);
+  const gamepadInput = pollGamepadInput();
 
   if (state.mode === 'playing'){
     state.elapsed += dt;
 
     // steering input
-    if (keys['ArrowLeft'] || keys['KeyA']) trySteer(-1);
-    if (keys['ArrowRight'] || keys['KeyD']) trySteer(1);
+    if (keys['ArrowLeft'] || keys['KeyA'] || gamepadInput.left) trySteer(-1);
+    if (keys['ArrowRight'] || keys['KeyD'] || gamepadInput.right) trySteer(1);
 
     // boost
-    const boosting = (keys['ArrowUp'] || keys['KeyW']) && state.boostCooldown <= 0;
+    const boosting = (keys['ArrowUp'] || keys['KeyW'] || gamepadInput.accelerate) && state.boostCooldown <= 0;
     if (boosting){
       state.boostTimer = Math.min(state.boostTimer + dt*2, 1);
     } else {
